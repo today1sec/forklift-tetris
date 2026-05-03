@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>ForkliftAI Tetris v0.1</title>
+<style>
+  body {
+    background: #111;
+    color: #eee;
+    font-family: 'Segoe UI', 'Malgun Gothic', sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+  }
+  .game-container {
+    display: flex;
+    gap: 24px;
+    padding: 24px;
+  }
+  canvas#board {
+    border: 2px solid #444;
+    background: #000;
+  }
+  canvas#next {
+    border: 1px solid #333;
+    background: #000;
+  }
+  .panel {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    min-width: 160px;
+  }
+  .panel h2 {
+    margin: 0 0 4px 0;
+    font-size: 12px;
+    letter-spacing: 1px;
+    color: #888;
+    text-transform: uppercase;
+  }
+  .panel .value {
+    font-size: 28px;
+    font-weight: bold;
+    color: #fff;
+  }
+  #status {
+    font-size: 18px;
+    font-weight: bold;
+    color: #4fc3f7;
+  }
+  #status.over { color: #ff5252; }
+  #status.pause { color: #ffd54f; }
+  .controls {
+    font-size: 12px;
+    color: #888;
+    line-height: 1.7;
+    border-top: 1px solid #333;
+    padding-top: 12px;
+  }
+  .brand {
+    font-size: 11px;
+    color: #555;
+    margin-top: 8px;
+  }
+</style>
+</head>
+<body>
+<div class="game-container">
+  <canvas id="board" width="300" height="600"></canvas>
+  <div class="panel">
+    <div>
+      <h2>점수</h2>
+      <div class="value" id="score">0</div>
+    </div>
+    <div>
+      <h2>최고 점수</h2>
+      <div class="value" id="best">0</div>
+    </div>
+    <div>
+      <h2>다음 블록</h2>
+      <canvas id="next" width="120" height="120"></canvas>
+    </div>
+    <div>
+      <h2>상태</h2>
+      <div id="status">PLAY</div>
+    </div>
+    <div class="controls">
+      ← → : 좌우 이동<br>
+      ↑ : 회전<br>
+      ↓ : 소프트 드롭<br>
+      Space : 하드 드롭<br>
+      R : 재시작<br>
+      P : 일시정지
+    </div>
+    <div class="brand">ForkliftAI Tetris v0.1</div>
+  </div>
+</div>
+<script>
+const COLS = 10, ROWS = 20, CELL = 30;
+const boardEl = document.getElementById('board');
+const ctx = boardEl.getContext('2d');
+const nextEl = document.getElementById('next');
+const nctx = nextEl.getContext('2d');
+const statusEl = document.getElementById('status');
+
+const COLORS = {
+  I: '#00f0f0', O: '#f0f000', T: '#a000f0',
+  S: '#00f000', Z: '#f00000', J: '#3060f0', L: '#f0a000'
+};
+
+const SHAPES = {
+  I: [[1,1,1,1]],
+  O: [[1,1],[1,1]],
+  T: [[0,1,0],[1,1,1]],
+  S: [[0,1,1],[1,1,0]],
+  Z: [[1,1,0],[0,1,1]],
+  J: [[1,0,0],[1,1,1]],
+  L: [[0,0,1],[1,1,1]]
+};
+
+let grid, current, nextPiece, score, best = 0, paused, gameOver, dropTimer;
+
+function emptyGrid() {
+  return Array.from({length: ROWS}, () => Array(COLS).fill(null));
+}
+
+function randomPiece() {
+  const keys = Object.keys(SHAPES);
+  const type = keys[Math.floor(Math.random() * keys.length)];
+  return {
+    type,
+    shape: SHAPES[type].map(r => r.slice()),
+    x: Math.floor((COLS - SHAPES[type][0].length) / 2),
+    y: 0
+  };
+}
+
+function rotate(shape) {
+  const rows = shape.length, cols = shape[0].length;
+  const out = Array.from({length: cols}, () => Array(rows).fill(0));
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++)
+      out[c][rows - 1 - r] = shape[r][c];
+  return out;
+}
+
+function collide(shape, x, y) {
+  for (let r = 0; r < shape.length; r++) {
+    for (let c = 0; c < shape[r].length; c++) {
+      if (!shape[r][c]) continue;
+      const nx = x + c, ny = y + r;
+      if (nx < 0 || nx >= COLS || ny >= ROWS) return true;
+      if (ny >= 0 && grid[ny][nx]) return true;
+    }
+  }
+  return false;
+}
+
+function merge() {
+  for (let r = 0; r < current.shape.length; r++) {
+    for (let c = 0; c < current.shape[r].length; c++) {
+      if (current.shape[r][c]) {
+        const ny = current.y + r;
+        if (ny >= 0) grid[ny][current.x + c] = current.type;
+      }
+    }
+  }
+}
+
+function clearLines() {
+  let cleared = 0;
+  for (let r = ROWS - 1; r >= 0; r--) {
+    if (grid[r].every(cell => cell)) {
+      grid.splice(r, 1);
+      grid.unshift(Array(COLS).fill(null));
+      cleared++;
+      r++; // recheck same index since rows shifted
+    }
+  }
+  const points = [0, 100, 300, 500, 800][cleared] || 0;
+  score += points;
+  if (score > best) best = score;
+}
+
+function spawn() {
+  current = nextPiece;
+  nextPiece = randomPiece();
+  if (collide(current.shape, current.x, current.y)) {
+    gameOver = true;
+    statusEl.textContent = 'GAME OVER (R)';
+    statusEl.className = 'over';
+    if (dropTimer) clearInterval(dropTimer);
+  }
+}
+
+function drop() {
+  if (!current || paused || gameOver) return;
+  if (!collide(current.shape, current.x, current.y + 1)) {
+    current.y++;
+  } else {
+    merge();
+    clearLines();
+    spawn();
+  }
+  draw();
+}
+
+function hardDrop() {
+  if (!current || paused || gameOver) return;
+  while (!collide(current.shape, current.x, current.y + 1)) current.y++;
+  merge();
+  clearLines();
+  spawn();
+  draw();
+}
+
+function move(dx) {
+  if (!current || paused || gameOver) return;
+  if (!collide(current.shape, current.x + dx, current.y)) current.x += dx;
+  draw();
+}
+
+function tryRotate() {
+  if (!current || paused || gameOver) return;
+  const rotated = rotate(current.shape);
+  // simple wall kick
+  for (const offset of [0, -1, 1, -2, 2]) {
+    if (!collide(rotated, current.x + offset, current.y)) {
+      current.shape = rotated;
+      current.x += offset;
+      draw();
+      return;
+    }
+  }
+}
+
+function drawCell(c, r, color, context, cell = CELL) {
+  context.fillStyle = color;
+  context.fillRect(c * cell, r * cell, cell, cell);
+  // inner highlight
+  context.fillStyle = 'rgba(255,255,255,0.15)';
+  context.fillRect(c * cell, r * cell, cell, 4);
+  context.fillRect(c * cell, r * cell, 4, cell);
+  // border
+  context.strokeStyle = 'rgba(0,0,0,0.4)';
+  context.lineWidth = 1;
+  context.strokeRect(c * cell + 0.5, r * cell + 0.5, cell - 1, cell - 1);
+}
+
+function draw() {
+  // board background
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, boardEl.width, boardEl.height);
+  // grid lines
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= COLS; i++) {
+    ctx.beginPath(); ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, boardEl.height); ctx.stroke();
+  }
+  for (let i = 0; i <= ROWS; i++) {
+    ctx.beginPath(); ctx.moveTo(0, i * CELL); ctx.lineTo(boardEl.width, i * CELL); ctx.stroke();
+  }
+  // landed blocks
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (grid[r][c]) drawCell(c, r, COLORS[grid[r][c]], ctx);
+    }
+  }
+  // current piece
+  if (current) {
+    for (let r = 0; r < current.shape.length; r++) {
+      for (let c = 0; c < current.shape[r].length; c++) {
+        if (current.shape[r][c]) {
+          const ny = current.y + r;
+          if (ny >= 0) drawCell(current.x + c, ny, COLORS[current.type], ctx);
+        }
+      }
+    }
+  }
+  // next preview
+  nctx.fillStyle = '#000';
+  nctx.fillRect(0, 0, nextEl.width, nextEl.height);
+  if (nextPiece) {
+    const cellN = 22;
+    const w = nextPiece.shape[0].length;
+    const h = nextPiece.shape.length;
+    const offX = (nextEl.width - w * cellN) / 2 / cellN;
+    const offY = (nextEl.height - h * cellN) / 2 / cellN;
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        if (nextPiece.shape[r][c]) {
+          drawCell(c + offX, r + offY, COLORS[nextPiece.type], nctx, cellN);
+        }
+      }
+    }
+  }
+  document.getElementById('score').textContent = score;
+  document.getElementById('best').textContent = best;
+}
+
+function start() {
+  grid = emptyGrid();
+  score = 0;
+  paused = false;
+  gameOver = false;
+  current = randomPiece();
+  nextPiece = randomPiece();
+  statusEl.textContent = 'PLAY';
+  statusEl.className = '';
+  if (dropTimer) clearInterval(dropTimer);
+  dropTimer = setInterval(drop, 500);
+  draw();
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'r' || e.key === 'R') { start(); return; }
+  if (e.key === 'p' || e.key === 'P') {
+    if (gameOver) return;
+    paused = !paused;
+    statusEl.textContent = paused ? 'PAUSED' : 'PLAY';
+    statusEl.className = paused ? 'pause' : '';
+    return;
+  }
+  if (gameOver || paused) return;
+  switch (e.key) {
+    case 'ArrowLeft': move(-1); break;
+    case 'ArrowRight': move(1); break;
+    case 'ArrowDown': drop(); break;
+    case 'ArrowUp': tryRotate(); break;
+    case ' ': e.preventDefault(); hardDrop(); break;
+  }
+});
+
+start();
+</script>
+</body>
+</html>
